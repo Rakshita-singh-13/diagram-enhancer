@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Diagram Image Enhancer</title>
-<meta name="de-version" content="2026.11.14-7">
+<meta name="de-version" content="2026.11.14-8">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:wght@400;700&family=Noto+Serif:wght@400;700&family=Noto+Sans:wght@400;700&family=Noto+Sans+Math&family=Noto+Sans+Symbols&family=Noto+Sans+Symbols+2&family=Noto+Sans+Mono&display=swap">
 <style>
 :root{
@@ -129,8 +129,8 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
 </head>
 <body>
 <header>
-  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.14-7</span></h1>
-  <p>Upscales, sharpens and cleans diagrams using pure image math (AI redraw only when you press “Redraw with Claude”), so lines, labels, structures and symbols stay exactly as drawn. Your images are processed on your own device and never uploaded.</p>
+  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.14-8</span></h1>
+  <p>Upscales, sharpens and cleans diagrams using pure image math (no AI redrawing), so lines, labels, structures and symbols stay exactly as drawn. Your images are processed on your own device and never uploaded.</p>
 </header>
 
 <div class="app">
@@ -244,7 +244,7 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
   <div class="btns">
     <button class="btn primary" id="copy" disabled>Copy enhanced image</button>
     <button class="btn" id="dl" disabled>Download enhanced PNG</button>
-    <button class="btn" id="redrawBtn" type="button" title="Claude looks at the figure and draws it again with clean, even lines">✨ Redraw with Claude (clean drawing)</button>
+    <button class="btn" id="redrawBtn" type="button" hidden data-off="1" title="Claude looks at the figure and draws it again with clean, even lines">✨ Redraw with Claude (clean drawing)</button>
     <button class="btn" id="dlsvg" hidden>Download SVG (vector, any size)</button>
     <button class="btn" id="dlall" disabled>Download all as ZIP</button>
     <p class="hint" id="dlhint" hidden>Downloads aren't available in this view. Right-click the enhanced image and choose <i>Save image as…</i></p>
@@ -1039,7 +1039,7 @@ function renderStatus(){
   else { el.innerHTML = '<span></span>'; el.firstChild.textContent = (!opts.vector && it.scaleUsed && it.scaleUsed !== opts.scale) ? `Done (size capped at ${it.scaleUsed}×)` : 'Done — drag to compare'; }
 }
 function updateButtons(){
-  $('#redrawBtn').hidden = mode === 'retype'; $('#redrawBtn').disabled = !selected && !!(sampleFn && canReadImages);
+  $('#redrawBtn').hidden = true; $('#redrawBtn').disabled = !selected && !!(sampleFn && canReadImages);
   if (mode === 'retype'){
     $('#dlsvg').hidden = true;
     const has = parseRows(curText()).length > 0;
