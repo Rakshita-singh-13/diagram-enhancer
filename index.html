@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Diagram Image Enhancer</title>
-<meta name="de-version" content="2026.11.14-6">
+<meta name="de-version" content="2026.11.14-7">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:wght@400;700&family=Noto+Serif:wght@400;700&family=Noto+Sans:wght@400;700&family=Noto+Sans+Math&family=Noto+Sans+Symbols&family=Noto+Sans+Symbols+2&family=Noto+Sans+Mono&display=swap">
 <style>
 :root{
@@ -129,8 +129,8 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
 </head>
 <body>
 <header>
-  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.14-6</span></h1>
-  <p>Upscales, sharpens and cleans diagrams using pure image math (no AI redrawing), so lines, labels, structures and symbols stay exactly as drawn. Your images are processed on your own device and never uploaded.</p>
+  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.14-7</span></h1>
+  <p>Upscales, sharpens and cleans diagrams using pure image math (AI redraw only when you press “Redraw with Claude”), so lines, labels, structures and symbols stay exactly as drawn. Your images are processed on your own device and never uploaded.</p>
 </header>
 
 <div class="app">
@@ -244,6 +244,7 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
   <div class="btns">
     <button class="btn primary" id="copy" disabled>Copy enhanced image</button>
     <button class="btn" id="dl" disabled>Download enhanced PNG</button>
+    <button class="btn" id="redrawBtn" type="button" title="Claude looks at the figure and draws it again with clean, even lines">✨ Redraw with Claude (clean drawing)</button>
     <button class="btn" id="dlsvg" hidden>Download SVG (vector, any size)</button>
     <button class="btn" id="dlall" disabled>Download all as ZIP</button>
     <p class="hint" id="dlhint" hidden>Downloads aren't available in this view. Right-click the enhanced image and choose <i>Save image as…</i></p>
@@ -1038,6 +1039,7 @@ function renderStatus(){
   else { el.innerHTML = '<span></span>'; el.firstChild.textContent = (!opts.vector && it.scaleUsed && it.scaleUsed !== opts.scale) ? `Done (size capped at ${it.scaleUsed}×)` : 'Done — drag to compare'; }
 }
 function updateButtons(){
+  $('#redrawBtn').hidden = mode === 'retype'; $('#redrawBtn').disabled = !selected && !!(sampleFn && canReadImages);
   if (mode === 'retype'){
     $('#dlsvg').hidden = true;
     const has = parseRows(curText()).length > 0;
@@ -1302,6 +1304,7 @@ function renderRetypeView(){
     try { const r = await fetch('/api/status', {cache:'no-store'}); const j = await r.json(); localApi = j.configured ? 'on' : 'nokey'; } catch(e){ localApi = null; }
   }
   $('#readLocalBtn').hidden = !(sampleFn && canReadImages);
+  if (!(sampleFn && canReadImages)) $('#redrawBtn').textContent = '✨ Redraw with Claude (opens the Claude version)';
   if (localApi === 'on'){ $('#readHint').textContent = 'Claude reads every symbol exactly as printed. Always check the result against the original.'; }
   else if (!canReadImages) $('#readHint').textContent = TOP ? 'The built-in reader works offline. Symbols it is unsure about are marked orange — click any symbol to fix it, and it learns your corrections.' : 'Claude reads every symbol exactly as printed. Always check the result against the original.';
   if (mode === 'retype') renderRetypeView();
@@ -1385,6 +1388,83 @@ function applyReadResult(it, res){
   if (odd.length) unc.push('symbols outside the usual set: ' + odd.join('  '));
   it.rtNote = unc.length ? '⚠ Please double-check: ' + unc.join('; ') : '✓ Read complete. Compare each row with the original before using it.';
 }
+/* ---------- Redraw with Claude: Claude looks at the figure and draws it again as clean SVG ---------- */
+const CLAUDE_LINK = 'https://claude.ai/artifact/VtVbJSfxsGSgrxRTfZWj1z';
+const redrawPrompt = (w, h) => `You are redrawing an exam-paper diagram as a clean vector drawing. The image is ${w}×${h} pixels.
+
+RULES — the redraw must contain exactly what is printed, nothing more and nothing less:
+- Keep every shape, line, curve, dot, arrow, symbol, number, letter and label, in the same place, size, direction and order.
+- Do not add, remove, correct, complete, simplify or "improve" anything. Do not fix what looks like a mistake. Where two lines cross or touch, draw them crossing or touching the same way.
+- Keep line styles: dashed stays dashed, filled shapes stay filled, open shapes stay open, arrowheads keep their type.
+- Text and labels: use <text> with font-family="Arial, Helvetica, sans-serif", the same characters, the same size and position. Use Unicode for symbols.
+- Style: black (#000) on white. All lines thin and uniform: one stroke-width for the whole drawing (about ${Math.max(0.8, Math.min(w,h)/90).toFixed(1)}), stroke-linejoin="miter", stroke-linecap="butt", fill="none" unless the original is filled. Straight lines perfectly straight; circles as <circle>; regular shapes with exact geometry.
+- Coordinates: use viewBox="0 0 ${w} ${h}" so every element sits where it is in the image. Plain SVG only: no <image>, <script>, <style>, <foreignObject>, filters or external links.
+
+Reply with only JSON: {"svg":"<svg ...>...</svg>","uncertain":["anything you could not read with certainty"]}`;
+function cleanSvg(src, w, h){
+  const doc = new DOMParser().parseFromString(src, 'image/svg+xml');
+  const svg = doc.documentElement;
+  if (!svg || svg.nodeName.toLowerCase() !== 'svg' || doc.querySelector('parsererror')) throw {code:'badsvg'};
+  const ALLOWED = new Set(['svg','g','path','line','polyline','polygon','rect','circle','ellipse','text','tspan','defs','marker','title','desc']);
+  const walk = (el) => { for (const c of [...el.children]){ if (!ALLOWED.has(c.nodeName.toLowerCase())){ c.remove(); continue; }
+      for (const a of [...c.attributes]){ const n = a.name.toLowerCase(); if (n.startsWith('on') || n === 'href' || n === 'xlink:href' || n === 'style' && /url\(|expression/i.test(a.value)) c.removeAttribute(a.name); }
+      walk(c); } };
+  for (const a of [...svg.attributes]) if (a.name.toLowerCase().startsWith('on')) svg.removeAttribute(a.name);
+  walk(svg);
+  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  const S = Math.max(2, Math.min(8, Math.round(1600 / Math.max(w, h))));
+  svg.setAttribute('width', w*S); svg.setAttribute('height', h*S);
+  svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+  const bg = doc.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  const vb = svg.getAttribute('viewBox').split(/[\s,]+/).map(Number);
+  bg.setAttribute('x', vb[0]||0); bg.setAttribute('y', vb[1]||0); bg.setAttribute('width', vb[2]||w); bg.setAttribute('height', vb[3]||h); bg.setAttribute('fill', '#fff');
+  svg.insertBefore(bg, svg.firstChild);
+  return {text: new XMLSerializer().serializeToString(svg), w2: w*S, h2: h*S, S};
+}
+async function svgToPng(svgText, w2, h2){
+  const url = URL.createObjectURL(new Blob([svgText], {type:'image/svg+xml'}));
+  try {
+    const im = new Image(); await new Promise((r, j) => { im.onload = r; im.onerror = () => j({code:'badsvg'}); im.src = url; });
+    const c = document.createElement('canvas'); c.width = w2; c.height = h2; const cx = c.getContext('2d');
+    cx.fillStyle = '#fff'; cx.fillRect(0, 0, w2, h2); cx.drawImage(im, 0, 0, w2, h2);
+    return await new Promise(r => c.toBlob(r, 'image/png'));
+  } finally { URL.revokeObjectURL(url); }
+}
+let redrawCtl = null;
+$('#redrawBtn').addEventListener('click', async () => {
+  const btn = $('#redrawBtn');
+  if (redrawCtl){ redrawCtl.abort(); return; }
+  if (!(sampleFn && canReadImages)){
+    toast('Redraw works in the Claude version of this tool — opening it. Sign in to Claude there, then paste your image again.');
+    window.open(CLAUDE_LINK, '_blank', 'noopener'); return;
+  }
+  const it = selected; if (!it) { toast('Add an image first'); return; }
+  redrawCtl = new AbortController();
+  btn.textContent = 'Claude is redrawing… (tap to stop)'; btn.classList.add('primary');
+  it.vnote = 'Claude is redrawing this figure. This can take up to a minute.'; renderStatus();
+  try {
+    const img = await imageForReading(it);
+    const res = await sampleFn.json(redrawPrompt(it.w, it.h), {images:[img], modelTier:'complex', signal:redrawCtl.signal});
+    const raw = String(res && res.svg || ''); if (!raw.includes('<svg')) throw {code:'empty'};
+    const sv = cleanSvg(raw.slice(raw.indexOf('<svg')), it.w, it.h);
+    const blob = await svgToPng(sv.text, sv.w2, sv.h2);
+    if (it.url) URL.revokeObjectURL(it.url);
+    it.blob = blob; it.url = URL.createObjectURL(blob); it.w2 = sv.w2; it.h2 = sv.h2; it.scaleUsed = sv.S; it.svg = sv.text; it.status = 'done'; it.redrawn = true;
+    const unc = Array.isArray(res.uncertain) ? res.uncertain.filter(Boolean).map(String) : [];
+    it.vnote = 'Redrawn by Claude. It draws the figure again, so compare it with the original before using it' + (unc.length ? ' — Claude was unsure about: ' + unc.join('; ') : '.') ;
+  } catch(e){
+    const code = e && e.code;
+    if (code === 'cancelled' || (e && e.name === 'AbortError')) it.vnote = '';
+    else if (code === 'not_granted' || code === 'sampling_disabled' || code === 'images_unavailable'){ canReadImages = false; it.vnote = 'Claude wasn’t allowed to look at the image. Reload the page and click “Allow” when claude.ai asks.'; }
+    else if (code === 'rate_limited') it.vnote = 'Too many requests right now. Please try again in a little while.';
+    else it.vnote = 'Claude couldn’t redraw this image this time. Try again.';
+  } finally {
+    redrawCtl = null; btn.textContent = '✨ Redraw with Claude (clean drawing)'; btn.classList.remove('primary');
+    renderStrip(); if (it === selected) renderViewer();
+  }
+});
+
 async function copyText(t){
   try { if (navigator.clipboard && window.isSecureContext){ await navigator.clipboard.writeText(t); return true; } } catch(e){}
   const ta = document.createElement('textarea'); ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select();
