@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Diagram Image Enhancer</title>
-<meta name="de-version" content="2026.11.14-2">
+<meta name="de-version" content="2026.11.14-3">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:wght@400;700&family=Noto+Serif:wght@400;700&family=Noto+Sans:wght@400;700&family=Noto+Sans+Math&family=Noto+Sans+Symbols&family=Noto+Sans+Symbols+2&family=Noto+Sans+Mono&display=swap">
 <style>
 :root{
@@ -129,7 +129,7 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
 </head>
 <body>
 <header>
-  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.14-2</span></h1>
+  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.14-3</span></h1>
   <p>Upscales, sharpens and cleans diagrams using pure image math (no AI redrawing), so lines, labels, structures and symbols stay exactly as drawn. Your images are processed on your own device and never uploaded.</p>
 </header>
 
@@ -293,7 +293,7 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
 "use strict";
 self.onmessage = (e) => {
   try { const r = enhance(e.data);
-    if (r.vector){ self.postMessage({type:'done', vector:true, d:r.d, w2:r.w2, h2:r.h2, scale:r.scale, colour:r.colour, shading:r.shading}); return; }
+    if (r.vector){ self.postMessage({type:'done', vector:true, d:r.d, sd:r.sd||'', sw:r.sw||0, w2:r.w2, h2:r.h2, scale:r.scale, colour:r.colour, shading:r.shading}); return; }
     self.postMessage({type:'done', data:r.data, w2:r.w2, h2:r.h2, scale:r.scale, switched:r.switched}, [r.data]); }
   catch (err) { self.postMessage({type:'error', message:String(err && err.message || err)}); }
 };
@@ -462,6 +462,98 @@ function resize(f, w, h, w2, h2, hasAlpha){
 }
 
 
+
+/* ---- uniform line redraw: centre lines redrawn as even pen strokes (no bulging joints, sharp corners, square ends) ---- */
+function lineRedraw(mask, W, H, S, vs, o){
+  const N=W*H, k=vs/S;
+  // distance to the nearest paper pixel
+  const dt=new Float32Array(N);
+  for (let i=0;i<N;i++) dt[i]=mask[i]?1e9:0;
+  const D=1.4142;
+  for (let y=0;y<H;y++) for (let x=0;x<W;x++){ const i=y*W+x; if (!dt[i]) continue; let v=dt[i];
+    v=Math.min(v, x>0?dt[i-1]+1:1, y>0?dt[i-W]+1:1, (x>0&&y>0)?dt[i-W-1]+D:D, (x<W-1&&y>0)?dt[i-W+1]+D:D); dt[i]=v; }
+  for (let y=H-1;y>=0;y--) for (let x=W-1;x>=0;x--){ const i=y*W+x; if (!dt[i]) continue; let v=dt[i];
+    v=Math.min(v, x<W-1?dt[i+1]+1:1, y<H-1?dt[i+W]+1:1, (x<W-1&&y<H-1)?dt[i+W+1]+D:D, (x>0&&y<H-1)?dt[i+W-1]+D:D); dt[i]=v; }
+  // thin to one-pixel centre lines (Zhang-Suen)
+  const sk=mask.slice(); let cand=[]; for (let i=0;i<N;i++) if (sk[i]) cand.push(i);
+  const nb=(i)=>{ const x=i%W, y=(i/W)|0; const g=(dx,dy)=>{ const xx=x+dx, yy=y+dy; return (xx<0||yy<0||xx>=W||yy>=H)?0:sk[yy*W+xx]; };
+    return [g(0,-1),g(1,-1),g(1,0),g(1,1),g(0,1),g(-1,1),g(-1,0),g(-1,-1)]; };
+  for (let changed=true, it=0; changed && it<200; it++){
+    changed=false;
+    for (const sub of [0,1]){
+      const del=[];
+      for (const i of cand){ if (!sk[i]) continue; const p=nb(i); let B=0; for (const q of p) B+=q; if (B<2||B>6) continue;
+        let A=0; for (let j=0;j<8;j++) if (!p[j] && p[(j+1)%8]) A++; if (A!==1) continue;
+        if (sub===0){ if (p[0]&&p[2]&&p[4]) continue; if (p[2]&&p[4]&&p[6]) continue; }
+        else { if (p[0]&&p[2]&&p[6]) continue; if (p[0]&&p[4]&&p[6]) continue; }
+        del.push(i); }
+      if (del.length){ changed=true; for (const i of del) sk[i]=0; }
+    }
+    cand=cand.filter(i=>sk[i]);
+  }
+  const skel=cand;
+  if (!skel.length) return null;
+  const sv=skel.map(i=>dt[i]).sort((a,b)=>a-b), hw=Math.max(1, sv[Math.floor(sv.length/2)]);
+  // solid parts (filled triangles, blocks, big dots) stay filled shapes
+  const fill=new Uint8Array(N);
+  for (let i=0;i<N;i++) if (mask[i] && dt[i] > hw*2.1){ const x=i%W, y=(i/W)|0, r=Math.ceil(dt[i]+1);
+    for (let yy=Math.max(0,y-r); yy<=Math.min(H-1,y+r); yy++) for (let xx=Math.max(0,x-r); xx<=Math.min(W-1,x+r); xx++){ const j=yy*W+xx; if (mask[j] && (xx-x)*(xx-x)+(yy-y)*(yy-y) <= r*r) fill[j]=1; } }
+  // tiny pieces (dots, specks of a symbol) also stay filled
+  const comp=new Int32Array(N).fill(-1), stack=[]; let nc=0; const cSk=[], cPix=[];
+  for (let i=0;i<N;i++){ if (!mask[i] || comp[i]>=0) continue; const id=nc++; cSk.push(0); cPix.push([]); stack.push(i); comp[i]=id;
+    while (stack.length){ const p=stack.pop(); cPix[id].push(p); if (sk[p]) cSk[id]++; const x=p%W, y=(p/W)|0;
+      for (let dy=-1;dy<=1;dy++) for (let dx=-1;dx<=1;dx++){ if (!dx&&!dy) continue; const xx=x+dx, yy=y+dy; if (xx<0||yy<0||xx>=W||yy>=H) continue; const q=yy*W+xx; if (mask[q] && comp[q]<0){ comp[q]=id; stack.push(q); } } } }
+  for (let c=0;c<nc;c++) if (cSk[c] < hw*4) for (const p of cPix[c]) fill[p]=1;
+  for (const i of skel) if (fill[i]) sk[i]=0;
+  // trace centre lines into chains
+  const isS=i=>sk[i]===1, nbrs=i=>{ const x=i%W, y=(i/W)|0, out=[]; for (let dy=-1;dy<=1;dy++) for (let dx=-1;dx<=1;dx++){ if (!dx&&!dy) continue; const xx=x+dx, yy=y+dy; if (xx<0||yy<0||xx>=W||yy>=H) continue; const q=yy*W+xx; if (sk[q]) out.push(q); } return out; };
+  const deg=new Uint8Array(N); const pts=skel.filter(isS); for (const i of pts) deg[i]=nbrs(i).length;
+  const used=new Uint8Array(N), chains=[], junctions=[];
+  const walk=(a, b)=>{ const ch=[a]; let prev=a, cur=b;
+    while (true){ ch.push(cur); if (deg[cur]!==2){ break; } used[cur]=1; const nx=nbrs(cur).filter(q=>q!==prev && !(used[q] && deg[q]===2)); if (!nx.length) break;
+      // prefer 4-neighbour continuation to avoid diagonal shortcuts
+      let next=nx[0]; prev=cur; cur=next; if (cur===a) { ch.push(a); break; } }
+    return ch; };
+  const seen=new Set();
+  for (const i of pts){ if (deg[i]===2) continue; if (deg[i]>=3) junctions.push(i);
+    for (const j of nbrs(i)){ if (deg[j]===2 && used[j]) continue; const key=Math.min(i,j)+','+Math.max(i,j); if (deg[j]!==2 && seen.has(key)) continue; seen.add(key);
+      const ch=walk(i, j); if (ch.length>1){ const e=ch[ch.length-1]; seen.add(Math.min(ch[ch.length-2],e)+','+Math.max(ch[ch.length-2],e)); chains.push({p:ch, closed:false}); } } }
+  for (const i of pts){ if (deg[i]!==2 || used[i]) continue; used[i]=1; const nx=nbrs(i); if (!nx.length) continue; const ch=walk(i, nx[0]); chains.push({p:ch, closed: ch[ch.length-1]===i}); }
+  // drop short spurs (thinning noise at corners)
+  const out=chains.filter(c => { const a=c.p[0], b=c.p[c.p.length-1]; const spur=(deg[a]===1&&deg[b]>=3)||(deg[b]===1&&deg[a]>=3); return !(spur && c.p.length < hw*2.2); });
+  const XY=i=>[(i%W)+0.5, ((i/W)|0)+0.5];
+  const dp=(P, tol)=>{ if (P.length<3) return P; let md=0, mi=0; const [ax,ay]=P[0], [bx,by]=P[P.length-1], L=Math.hypot(bx-ax,by-ay)||1;
+    for (let i=1;i<P.length-1;i++){ const d=Math.abs((by-ay)*P[i][0]-(bx-ax)*P[i][1]+bx*ay-by*ax)/L; if (d>md){ md=d; mi=i; } }
+    if (md<=tol) return [P[0], P[P.length-1]]; const l=dp(P.slice(0,mi+1),tol), r=dp(P.slice(mi),tol); return l.slice(0,-1).concat(r); };
+  const f2=v=>(v*k).toFixed(1);
+  let sd='';
+  const tol=Math.max(0.7, 0.28*S);
+  for (const c of out){
+    let P=c.p.map(XY);
+    // square ends: put back the half-width the thinning removed
+    const ext=(end)=>{ const n=P.length; if (n<2) return; const a= end? P[n-1] : P[0], bI = end? Math.max(0,n-1-Math.round(hw*2)) : Math.min(n-1, Math.round(hw*2)), b=P[bI];
+      const dx=a[0]-b[0], dy=a[1]-b[1], L=Math.hypot(dx,dy)||1; const np=[a[0]+dx/L*hw*0.95, a[1]+dy/L*hw*0.95]; if (end) P.push(np); else P.unshift(np); };
+    if (!c.closed){ if (deg[c.p[0]]===1) ext(false); if (deg[c.p[c.p.length-1]]===1) ext(true); }
+    let Q=dp(P, tol); if (c.closed && Q.length>2 && (Q[0][0]!==Q[Q.length-1][0] || Q[0][1]!==Q[Q.length-1][1])) Q.push(Q[0]);
+    const n=Q.length; if (n<2) continue;
+    const corner=(i)=>{ if (i<=0||i>=n-1) return true; const a=Q[i-1], b=Q[i], cc=Q[i+1]; const v1=[b[0]-a[0],b[1]-a[1]], v2=[cc[0]-b[0],cc[1]-b[1]];
+      const ang=Math.acos(Math.max(-1,Math.min(1,(v1[0]*v2[0]+v1[1]*v2[1])/((Math.hypot(...v1)||1)*(Math.hypot(...v2)||1))))); return ang > 0.6; };
+    const mid=(a,b)=>[(a[0]+b[0])/2,(a[1]+b[1])/2];
+    sd += 'M'+f2(Q[0][0])+' '+f2(Q[0][1]);
+    for (let i=1;i<n-1;i++){
+      if (corner(i)) sd+='L'+f2(Q[i][0])+' '+f2(Q[i][1]);
+      else { const m1=mid(Q[i-1],Q[i]), m2=mid(Q[i],Q[i+1]); sd+='L'+f2(m1[0])+' '+f2(m1[1])+'Q'+f2(Q[i][0])+' '+f2(Q[i][1])+' '+f2(m2[0])+' '+f2(m2[1]); }
+    }
+    sd += 'L'+f2(Q[n-1][0])+' '+f2(Q[n-1][1]);
+    if (c.closed) sd+='Z';
+  }
+  // junction caps keep T and X joints solid (no notches)
+  let jd='';
+  for (const j of junctions){ if (!sk[j]) continue; const [x,y]=XY(j), r=hw*0.98; jd+=`M${f2(x-r)} ${f2(y)}a${f2(r)} ${f2(r)} 0 1 0 ${f2(2*r)} 0a${f2(r)} ${f2(r)} 0 1 0 ${f2(-2*r)} 0`; }
+  const fd = self.traceMask(fill, W, H, k, {turdSize: Math.round(S*S*0.3), alphaMax: 0.9, optTolerance: 0.3});
+  return {fd: fd + jd, sd, sw: Math.max(1, (2*hw-0.6)*k)};
+}
+
 /* ---- vector smooth: trace every line and letter into smooth curves (potrace), redraw at any size ---- */
 function vectorize(f, w, h, o){
   const S = Math.max(2, Math.min(8, Math.floor(Math.sqrt(12e6/(w*h)))));
@@ -473,7 +565,7 @@ function vectorize(f, w, h, o){
   let sat = 0;
   for (let i=0;i<N;i++){ const k=i*4, r=up[k], g=up[k+1], b=up[k+2], mx=Math.max(r,g,b), mn=Math.min(r,g,b); V[i]=mn; if (mx-mn>60 && mn<200) sat++; }
   prog('Tracing lines', .5);
-  const Vb = gauss(V, W, H, Math.max(0.5, 0.65*o.smooth*S));
+  const Vb = gauss(V, W, H, Math.max(0.5, (o.vBlur ?? 0.35)*o.smooth*S));
   const hist = new Uint32Array(256); for (let i=0;i<N;i++) hist[Math.max(0,Math.min(255,Vb[i]|0))]++;
   let acc=0, ink=0; for (let i=0;i<256;i++){ acc+=hist[i]; if (acc>=N*0.01){ ink=i; break; } }
   // local paper brightness (handles shadows)
@@ -492,7 +584,15 @@ function vectorize(f, w, h, o){
     g2[y*gw+x]=m; }
   for (let p=0;p<2;p++){ const g3=new Float32Array(g2.length); for (let y=0;y<gh;y++) for (let x=0;x<gw;x++){ let sm=0,n=0; for (let dy=-1;dy<=1;dy++) for (let dx=-1;dx<=1;dx++){ const yy=Math.min(gh-1,Math.max(0,y+dy)), xx=Math.min(gw-1,Math.max(0,x+dx)); sm+=g2[yy*gw+xx]; n++; } g3[y*gw+x]=sm/n; } g2=g3; }
   const mask = new Uint8Array(N);
-  const lvl = 0.6 + o.bold/100;
+  const lvl = (o.vLvl ?? 0.5) + o.bold/100;
+  // each line is judged against its OWN darkness: pale thin slanted lines get the same thickness as dark straight ones
+  let locMin = null;
+  if (o.vLocal !== false){
+    const r = Math.max(2, Math.round(1.6*S));
+    const t = new Float32Array(N); locMin = new Float32Array(N);
+    for (let y=0;y<H;y++){ const row=y*W; for (let x=0;x<W;x++){ let m=255; const a0=Math.max(0,x-r), a1=Math.min(W-1,x+r); for (let xx=a0;xx<=a1;xx++){ const v=Vb[row+xx]; if (v<m) m=v; } t[row+x]=m; } }
+    for (let x=0;x<W;x++) for (let y=0;y<H;y++){ let m=255; const b0=Math.max(0,y-r), b1=Math.min(H-1,y+r); for (let yy=b0;yy<=b1;yy++){ const v=t[yy*W+x]; if (v<m) m=v; } locMin[y*W+x]=m; }
+  }
   let mid = 0;
   for (let y=0;y<H;y++){
     let fy=Math.min(gh-1,Math.max(0,(y+.5)/B-.5)); const y0=fy|0, y1=Math.min(gh-1,y0+1); fy-=y0;
@@ -500,7 +600,10 @@ function vectorize(f, w, h, o){
       let fx=Math.min(gw-1,Math.max(0,(x+.5)/B-.5)); const x0=fx|0, x1=Math.min(gw-1,x0+1); fx-=x0;
       const P=(g2[y0*gw+x0]*(1-fx)+g2[y0*gw+x1]*fx)*(1-fy)+(g2[y1*gw+x0]*(1-fx)+g2[y1*gw+x1]*fx)*fy;
       const R=Math.max(30, P-ink), i=y*W+x, v=Vb[i];
-      mask[i] = v < ink + R*Math.min(0.92, Math.max(0.2, lvl)) ? 1 : 0;
+      if (locMin){
+        const lo=locMin[i], span=P-lo;
+        mask[i] = ((span > R*0.22) && (v < lo + span*Math.min(0.92, Math.max(0.2, lvl)))) || v < ink + R*Math.min(0.92, Math.max(0.2, lvl - 0.05)) ? 1 : 0;
+      } else mask[i] = v < ink + R*Math.min(0.92, Math.max(0.2, lvl)) ? 1 : 0;
     }
   }
   // grey-shading check at the original resolution (thin line edges don't count, flat grey areas do)
@@ -513,7 +616,11 @@ function vectorize(f, w, h, o){
     mid = mid / n0 * N; }
   prog('Drawing smooth curves', .7);
   const vs = o.vscale || 6;
-  const d = self.traceMask(mask, W, H, vs/S, {turdSize: Math.round(S*S*0.8), alphaMax: 0.95, optTolerance: 0.55});
+  if (o.vUniform === true){
+    const lr = lineRedraw(mask, W, H, S, vs, o);
+    if (lr) return {vector:true, d: lr.fd, sd: lr.sd, sw: lr.sw, w2: w*vs, h2: h*vs, scale: vs, colour: sat > N*0.003, shading: mid > N*0.02};
+  }
+  const d = self.traceMask(mask, W, H, vs/S, {turdSize: Math.round(S*S*0.8), alphaMax: (o.vAlpha ?? 0.9), optTolerance: (o.vTol ?? 0.3)});
   return {vector:true, d, w2: w*vs, h2: h*vs, scale: vs, colour: sat > N*0.003, shading: mid > N*0.02};
 }
 
@@ -798,8 +905,9 @@ function process(it){
     it.svg = null; it.vnote = '';
     if (m.vector){
       const cx = oc.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, m.w2, m.h2);
-      cx.fillStyle = '#000'; if (m.d) cx.fill(new Path2D(m.d), 'evenodd');
-      it.svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${m.w2}" height="${m.h2}" viewBox="0 0 ${m.w2} ${m.h2}"><rect width="100%" height="100%" fill="#fff"/><path fill="#000" fill-rule="evenodd" d="${m.d}"/></svg>`;
+      cx.fillStyle = '#000'; if (m.d) cx.fill(new Path2D(m.d), m.sd ? 'nonzero' : 'evenodd');
+      if (m.sd){ cx.strokeStyle = '#000'; cx.lineWidth = m.sw; cx.lineJoin = 'miter'; cx.miterLimit = 6; cx.lineCap = 'butt'; cx.stroke(new Path2D(m.sd)); }
+      it.svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${m.w2}" height="${m.h2}" viewBox="0 0 ${m.w2} ${m.h2}"><rect width="100%" height="100%" fill="#fff"/><path fill="#000" fill-rule="${m.sd ? 'nonzero' : 'evenodd'}" d="${m.d}"/>${m.sd ? `<path fill="none" stroke="#000" stroke-width="${m.sw.toFixed(2)}" stroke-linejoin="miter" stroke-miterlimit="6" stroke-linecap="butt" d="${m.sd}"/>` : ''}</svg>`;
       if (m.colour || m.shading) it.vnote = 'This image has ' + (m.colour ? 'colour' : '') + (m.colour && m.shading ? ' and ' : '') + (m.shading ? 'grey shading' : '') + '. Vector mode draws black lines only, so choose the “Crisp” preset to keep them.';
     } else {
       oc.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(m.data), m.w2, m.h2), 0, 0);
