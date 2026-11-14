@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Diagram Image Enhancer</title>
-<meta name="de-version" content="2026.11.14-3">
+<meta name="de-version" content="2026.11.14-4">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:wght@400;700&family=Noto+Serif:wght@400;700&family=Noto+Sans:wght@400;700&family=Noto+Sans+Math&family=Noto+Sans+Symbols&family=Noto+Sans+Symbols+2&family=Noto+Sans+Mono&display=swap">
 <style>
 :root{
@@ -129,7 +129,7 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
 </head>
 <body>
 <header>
-  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.14-3</span></h1>
+  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.14-4</span></h1>
   <p>Upscales, sharpens and cleans diagrams using pure image math (no AI redrawing), so lines, labels, structures and symbols stay exactly as drawn. Your images are processed on your own device and never uploaded.</p>
 </header>
 
@@ -310,6 +310,8 @@ function enhance({data, w, h, opts}){
   if (opts.flatten){ prog('Evening out lighting', .05); flatten(f, w, h); }
   if (opts.denoise>0){ prog('Reducing noise', .12); f = bilateral(f, w, h, opts.denoise); }
   let switched = false;
+  // very small images: lines are ~1 pixel wide and touch each other, so tracing would merge them into blobs
+  if (opts.vector && w*h < 30000){ switched = 'tiny'; opts = {...opts, vector:false, crisp:false, scale: Math.max(4, Math.min(6, opts.vscale||4))}; }
   if (opts.vector){
     prog('Tracing lines', .3);
     const fv = f.slice();
@@ -911,7 +913,8 @@ function process(it){
       if (m.colour || m.shading) it.vnote = 'This image has ' + (m.colour ? 'colour' : '') + (m.colour && m.shading ? ' and ' : '') + (m.shading ? 'grey shading' : '') + '. Vector mode draws black lines only, so choose the “Crisp” preset to keep them.';
     } else {
       oc.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(m.data), m.w2, m.h2), 0, 0);
-      if (m.switched) it.vnote = 'This figure has shading or colour, so it was enhanced in Crisp mode to keep it exactly.';
+      if (m.switched === 'tiny') it.vnote = `This image is very small (${it.w}×${it.h} px): its lines are only 1 pixel thin and touch each other, so tracing would merge them into blobs. It was enlarged without tracing instead. For a clean redrawn result, take a bigger screenshot — zoom the PDF to 200–300% first.`;
+      else if (m.switched) it.vnote = 'This figure has shading or colour, so it was enhanced in Crisp mode to keep it exactly.';
     }
     const blob = await new Promise(r => oc.toBlob(r, 'image/png'));
     if (current !== it) return; // cancelled meanwhile
