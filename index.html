@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Diagram Image Enhancer</title>
-<meta name="de-version" content="2026.11.14-5">
+<meta name="de-version" content="2026.11.14-6">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:wght@400;700&family=Noto+Serif:wght@400;700&family=Noto+Sans:wght@400;700&family=Noto+Sans+Math&family=Noto+Sans+Symbols&family=Noto+Sans+Symbols+2&family=Noto+Sans+Mono&display=swap">
 <style>
 :root{
@@ -129,7 +129,7 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
 </head>
 <body>
 <header>
-  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.14-5</span></h1>
+  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.14-6</span></h1>
   <p>Upscales, sharpens and cleans diagrams using pure image math (no AI redrawing), so lines, labels, structures and symbols stay exactly as drawn. Your images are processed on your own device and never uploaded.</p>
 </header>
 
@@ -311,7 +311,9 @@ function enhance({data, w, h, opts}){
   if (opts.denoise>0){ prog('Reducing noise', .12); f = bilateral(f, w, h, opts.denoise); }
   let switched = false;
   // very small images: lines are ~1 pixel wide and touch each other, so tracing would merge them into blobs
-  if (opts.vector && w*h < 30000){ switched = 'tiny'; opts = {...opts, vector:false, crisp:false, scale: Math.max(4, Math.min(6, opts.vscale||4))}; }
+  if (opts.vector && w*h < 6000 && !opts.vForce){ switched = 'tiny'; opts = {...opts, vector:false, crisp:false, scale: Math.max(4, Math.min(6, opts.vscale||4))}; }
+  // small images (lines about 1 pixel wide): redraw each line along its centre with one even pen width
+  if (opts.vector && w*h < 30000) opts = {vUniform:true, vBlur:0.2, vSw:0.75, vDp:0.4, ...opts};
   if (opts.vector){
     prog('Tracing lines', .3);
     const fv = f.slice();
@@ -529,7 +531,7 @@ function lineRedraw(mask, W, H, S, vs, o){
     if (md<=tol) return [P[0], P[P.length-1]]; const l=dp(P.slice(0,mi+1),tol), r=dp(P.slice(mi),tol); return l.slice(0,-1).concat(r); };
   const f2=v=>(v*k).toFixed(1);
   let sd='';
-  const tol=Math.max(0.7, 0.28*S);
+  const tol=Math.max(0.7, (o.vDp ?? 0.28)*S);
   for (const c of out){
     let P=c.p.map(XY);
     // square ends: put back the half-width the thinning removed
@@ -551,9 +553,9 @@ function lineRedraw(mask, W, H, S, vs, o){
   }
   // junction caps keep T and X joints solid (no notches)
   let jd='';
-  for (const j of junctions){ if (!sk[j]) continue; const [x,y]=XY(j), r=hw*0.98; jd+=`M${f2(x-r)} ${f2(y)}a${f2(r)} ${f2(r)} 0 1 0 ${f2(2*r)} 0a${f2(r)} ${f2(r)} 0 1 0 ${f2(-2*r)} 0`; }
+  for (const j of junctions){ if (!sk[j]) continue; const [x,y]=XY(j), r=hw*0.98*(o.vSw ?? 1); jd+=`M${f2(x-r)} ${f2(y)}a${f2(r)} ${f2(r)} 0 1 0 ${f2(2*r)} 0a${f2(r)} ${f2(r)} 0 1 0 ${f2(-2*r)} 0`; }
   const fd = self.traceMask(fill, W, H, k, {turdSize: Math.round(S*S*0.3), alphaMax: 0.9, optTolerance: 0.3});
-  return {fd: fd + jd, sd, sw: Math.max(1, (2*hw-0.6)*k)};
+  return {fd: fd + jd, sd, sw: Math.max(1, (2*hw-0.6)*k*(o.vSw ?? 1))};
 }
 
 /* ---- vector smooth: trace every line and letter into smooth curves (potrace), redraw at any size ---- */
