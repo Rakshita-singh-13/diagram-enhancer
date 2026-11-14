@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Diagram Image Enhancer</title>
-<meta name="de-version" content="2026.11.14-4">
+<meta name="de-version" content="2026.11.14-5">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:wght@400;700&family=Noto+Serif:wght@400;700&family=Noto+Sans:wght@400;700&family=Noto+Sans+Math&family=Noto+Sans+Symbols&family=Noto+Sans+Symbols+2&family=Noto+Sans+Mono&display=swap">
 <style>
 :root{
@@ -129,7 +129,7 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
 </head>
 <body>
 <header>
-  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.14-4</span></h1>
+  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.14-5</span></h1>
   <p>Upscales, sharpens and cleans diagrams using pure image math (no AI redrawing), so lines, labels, structures and symbols stay exactly as drawn. Your images are processed on your own device and never uploaded.</p>
 </header>
 
@@ -557,6 +557,46 @@ function lineRedraw(mask, W, H, S, vs, o){
 }
 
 /* ---- vector smooth: trace every line and letter into smooth curves (potrace), redraw at any size ---- */
+/* ---- straighten long horizontal / vertical lines: frames, bars and axes come out ruler-straight with one even thickness ---- */
+function straightenLines(mask, W, H, S, minLen){
+  const pass = (get, set, A, Bn) => {          // A = length along the line, Bn = across
+    const run = new Uint16Array(A*Bn), isL = new Uint8Array(A*Bn);
+    for (let b=0;b<Bn;b++){ let a=0; while (a<A){ if (!get(a,b)){ a++; continue; } let e=a; while (e<A && get(e,b)) e++; if (e-a >= minLen) for (let k=a;k<e;k++) isL[b*A+k]=1; a=e; } }
+    // group line pixels into bands
+    const seen = new Uint8Array(A*Bn), st = [];
+    const lines = [];
+    for (let b0=0;b0<Bn;b0++) for (let a0=0;a0<A;a0++){ const i0=b0*A+a0; if (!isL[i0] || seen[i0]) continue;
+      seen[i0]=1; st.push(i0); const pix=[];
+      while (st.length){ const p=st.pop(); pix.push(p); const a=p%A, b=(p/A)|0;
+        for (const [da,db] of [[1,0],[-1,0],[0,1],[0,-1]]){ const aa=a+da, bb=b+db; if (aa<0||bb<0||aa>=A||bb>=Bn) continue; const q=bb*A+aa; if (isL[q] && !seen[q]){ seen[q]=1; st.push(q); } } }
+      // per position along the line: top, bottom
+      let a0m=A, a1m=-1; for (const p of pix){ const a=p%A; if (a<a0m) a0m=a; if (a>a1m) a1m=a; }
+      const L=a1m-a0m+1, top=new Float32Array(L).fill(1e9), bot=new Float32Array(L).fill(-1);
+      for (const p of pix){ const a=p%A-a0m, b=(p/A)|0; if (b<top[a]) top[a]=b; if (b>bot[a]) bot[a]=b; }
+      lines.push({pix, a0:a0m, L, top, bot});
+    }
+    for (const ln of lines){
+      const th=[], xs=[], cs=[];
+      for (let k=0;k<ln.L;k++){ if (ln.bot[k]<0) continue; th.push(ln.bot[k]-ln.top[k]+1); xs.push(k); cs.push((ln.top[k]+ln.bot[k])/2); }
+      if (xs.length < minLen*0.8) continue;
+      const ts=th.slice().sort((a,b)=>a-b), t=ts[Math.floor(ts.length/2)];
+      if (t > 4.5*S) continue;                    // a filled area, not a line
+      // straight-line fit of the centre (least squares, then refit without outliers)
+      const fit=(use)=>{ let n=0,sx=0,sy=0,sxx=0,sxy=0; for (let j=0;j<xs.length;j++){ if (!use[j]) continue; const x=xs[j], y=cs[j]; n++; sx+=x; sy+=y; sxx+=x*x; sxy+=x*y; } const d=n*sxx-sx*sx; const m=d? (n*sxy-sx*sy)/d : 0; return [m, (sy-m*sx)/Math.max(1,n)]; };
+      let use=new Uint8Array(xs.length).fill(1), [m,c]=fit(use);
+      for (let j=0;j<xs.length;j++) if (Math.abs(cs[j]-(m*xs[j]+c)) > t*0.6) use[j]=0;
+      [m,c]=fit(use);
+      let bad=0; for (let j=0;j<xs.length;j++) if (Math.abs(cs[j]-(m*xs[j]+c)) > t*0.75) bad++;
+      if (bad > xs.length*0.25 || Math.abs(m) > 0.08) continue;   // curved or slanted: leave as drawn
+      for (const p of ln.pix){ set(p%A, (p/A)|0, 0); }
+      for (let k=0;k<ln.L;k++){ const cc=m*k+c, y0=Math.round(cc-t/2+0.5), y1=y0+t-1;
+        for (let b=Math.max(0,y0); b<=Math.min(Bn-1,y1); b++) set(ln.a0+k, b, 1); }
+    }
+  };
+  pass((x,y)=>mask[y*W+x], (x,y,v)=>{ mask[y*W+x]=v; }, W, H);
+  pass((y,x)=>mask[y*W+x], (y,x,v)=>{ mask[y*W+x]=v; }, H, W);
+}
+
 function vectorize(f, w, h, o){
   const S = Math.max(2, Math.min(8, Math.floor(Math.sqrt(12e6/(w*h)))));
   const W = w*S, H = h*S;
@@ -608,6 +648,7 @@ function vectorize(f, w, h, o){
       } else mask[i] = v < ink + R*Math.min(0.92, Math.max(0.2, lvl)) ? 1 : 0;
     }
   }
+  if (o.vStraight !== false) straightenLines(mask, W, H, S, Math.max(12*S, Math.round(Math.max(W,H)*0.06)));
   // grey-shading check at the original resolution (thin line edges don't count, flat grey areas do)
   { const n0=w*h, sv=new Float32Array(n0); for (let i=0;i<n0;i++){ sv[i]=Math.min(f[i*4],f[i*4+1],f[i*4+2]); }
     const sg=gauss(sv, w, h, 1.5), sh=new Uint32Array(256); for (let i=0;i<n0;i++) sh[Math.max(0,Math.min(255,sv[i]|0))]++;
