@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Diagram Image Enhancer</title>
-<meta name="de-version" content="2026.11.16-1">
+<meta name="de-version" content="2026.11.16-2">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:wght@400;700&family=Noto+Serif:wght@400;700&family=Noto+Sans:wght@400;700&family=Noto+Sans+Math&family=Noto+Sans+Symbols&family=Noto+Sans+Symbols+2&family=Noto+Sans+Mono&display=swap">
 <style>
 :root{
@@ -129,7 +129,7 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
 </head>
 <body>
 <header>
-  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.16-1</span></h1>
+  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.16-2</span></h1>
   <p>Upscales, sharpens and cleans diagrams using pure image math (no AI redrawing), so lines, labels, structures and symbols stay exactly as drawn. Your images are processed on your own device and never uploaded.</p>
 </header>
 
@@ -607,8 +607,8 @@ function vectorize(f, w, h, o){
   prog('Tracing lines', .35);
   const up = resize(f, w, h, W, H, false);
   const N = W*H, V = new Float32Array(N);
-  let sat = 0;
-  for (let i=0;i<N;i++){ const k=i*4, r=up[k], g=up[k+1], b=up[k+2], mx=Math.max(r,g,b), mn=Math.min(r,g,b); V[i]=mn; if (mx-mn>60 && mn<200) sat++; }
+  let sat = 0, tint = 0;   // tint: pale coloured fills (light pink, yellow, blue boxes)
+  for (let i=0;i<N;i++){ const k=i*4, r=up[k], g=up[k+1], b=up[k+2], mx=Math.max(r,g,b), mn=Math.min(r,g,b); V[i]=mn; if (mx-mn>60 && mn<200) sat++; else if (mx-mn>=12 && mn>170) tint++; }
   prog('Tracing lines', .5);
   const Vb = gauss(V, W, H, Math.max(0.5, (o.vBlur ?? 0.35)*o.smooth*S));
   const hist = new Uint32Array(256); for (let i=0;i<N;i++) hist[Math.max(0,Math.min(255,Vb[i]|0))]++;
@@ -664,10 +664,10 @@ function vectorize(f, w, h, o){
   const vs = o.vscale || 6;
   if (o.vUniform === true){
     const lr = lineRedraw(mask, W, H, S, vs, o);
-    if (lr) return {vector:true, d: lr.fd, sd: lr.sd, sw: lr.sw, w2: w*vs, h2: h*vs, scale: vs, colour: sat > N*0.003, shading: mid > N*0.02};
+    if (lr) return {vector:true, d: lr.fd, sd: lr.sd, sw: lr.sw, w2: w*vs, h2: h*vs, scale: vs, colour: sat > N*0.003 || tint > N*0.02, shading: mid > N*0.02};
   }
   const d = self.traceMask(mask, W, H, vs/S, {turdSize: Math.round(S*S*0.8), alphaMax: (o.vAlpha ?? 0.9), optTolerance: (o.vTol ?? 0.3)});
-  return {vector:true, d, w2: w*vs, h2: h*vs, scale: vs, colour: sat > N*0.003, shading: mid > N*0.02};
+  return {vector:true, d, w2: w*vs, h2: h*vs, scale: vs, colour: sat > N*0.003 || tint > N*0.02, shading: mid > N*0.02};
 }
 
 /* ---- crisp mode: smooth anti-aliased black/colour ink on pure white ---- */
