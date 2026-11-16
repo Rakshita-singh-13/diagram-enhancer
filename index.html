@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Diagram Image Enhancer</title>
-<meta name="de-version" content="2026.11.16-4">
+<meta name="de-version" content="2026.11.16-5">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:wght@400;700&family=Noto+Serif:wght@400;700&family=Noto+Sans:wght@400;700&family=Noto+Sans+Math&family=Noto+Sans+Symbols&family=Noto+Sans+Symbols+2&family=Noto+Sans+Mono&display=swap">
 <style>
 :root{
@@ -129,7 +129,7 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
 </head>
 <body>
 <header>
-  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.16-4</span></h1>
+  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.16-5</span></h1>
   <p>Upscales, sharpens and cleans diagrams using pure image math (no AI redrawing), so lines, labels, structures and symbols stay exactly as drawn. Your images are processed on your own device and never uploaded.</p>
 </header>
 
@@ -776,6 +776,22 @@ function crisp(out, w, h, o, s){
     else if (Math.min(R.r,R.g,R.b) > 246 && Math.max(R.r,R.g,R.b)-Math.min(R.r,R.g,R.b) < 6) R.out=[255,255,255];
     else R.out=[R.r, R.g, R.b];                                         // a fill of its own: keep its colour, evened out
   }
+  // one colour per shade: fills that print as the same shade (uneven ink, scan light) snap to one shared colour
+  { const pal=[];  // [r,g,b, weight]
+    for (const id of order){ const R=reg[id]; if (!R.out || R.out.snapped) continue; const c=R.out;
+      if (c[0]===255 && c[1]===255 && c[2]===255) continue;
+      let best=-1, bd=1e9; for (let j=0;j<pal.length;j++){ const P=pal[j]; const d=Math.max(Math.abs(P[0]-c[0]), Math.abs(P[1]-c[1]), Math.abs(P[2]-c[2])); if (d<bd){ bd=d; best=j; } }
+      if (best>=0 && bd <= 14){ const P=pal[best]; R.out=P.col; P.n+=R.n; }
+      else { const col=[c[0],c[1],c[2]]; col.snapped=true; const P=[c[0],c[1],c[2]]; P.col=col; P.n=R.n; pal.push(P); R.out=col; } }
+    // a tiny stain of a near shade (scan smudge) joins the main shade or the paper beside it
+    for (const P of pal){ if (P.n > N*0.004) continue; let bc=null, bd=1e9;
+      for (const Q of pal){ if (Q===P || Q.n < P.n*4) continue; const d=Math.max(Math.abs(P[0]-Q[0]), Math.abs(P[1]-Q[1]), Math.abs(P[2]-Q[2])); if (d<bd){ bd=d; bc=Q; } }
+      const dw=Math.max(255-P[0], 255-P[1], 255-P[2]);
+      if (dw < bd && dw <= 30){ P.col[0]=P.col[1]=P.col[2]=255; }
+      else if (bc && bd <= 30){ P.col[0]=bc[0]; P.col[1]=bc[1]; P.col[2]=bc[2]; } }
+    // a shade so close to white that it is just paper tone becomes white
+    for (const P of pal){ const c=P.col; if (Math.min(c[0],c[1],c[2]) > 248 && Math.max(c[0],c[1],c[2])-Math.min(c[0],c[1],c[2]) < 5){ c[0]=c[1]=c[2]=255; } }
+  }
   for (let i=0;i<N;i++){
     const k=i*4;
     // background level: the box colour around, but inside a pen stroke (letters, lines) the paper next to the stroke
@@ -793,11 +809,18 @@ function crisp(out, w, h, o, s){
     let br=bgc[0][i], bg2=bgc[1][i], bb=bgc[2][i];
     const bl=0.299*br+0.587*bg2+0.114*bb, bs=Math.max(br,bg2,bb)-Math.min(br,bg2,bb);
     let tinted=false;
-    if (near[i]>=0 && nd[i] <= 8*s){ const Rg=reg[lab[near[i]]]; if (Rg && Rg.out){ br=Rg.out[0]; bg2=Rg.out[1]; bb=Rg.out[2]; tinted=true; } }
+    if (near[i]>=0){ const Rg=reg[lab[near[i]]];
+      if (Rg && Rg.out){
+        // close to clean background, or a light smudge inside an area (scan blotch, uneven ink): take the area's one colour
+        const dc=Math.max(Math.abs(br-Rg.out[0]), Math.abs(bg2-Rg.out[1]), Math.abs(bb-Rg.out[2]));
+        const isWhite = Rg.out[0]===255 && Rg.out[1]===255 && Rg.out[2]===255;
+        if (nd[i] <= 8*s || (!isWhite && a < 0.35 && dc < 40)){ br=Rg.out[0]; bg2=Rg.out[1]; bb=Rg.out[2]; tinted=true; } } }
     const dpc = Math.max(Math.abs(br-pc[0]), Math.abs(bg2-pc[1]), Math.abs(bb-pc[2]));
     if (!tinted && ((bl > 232 && bs < 10) || dpc < 12 || (bs < 12 && bl >= paper[i] - 0.12*Math.max(30, paper[i]-ink)))){ br=bg2=bb=255; }   // paper (even dim grey paper) -> clean white; tinted boxes keep their colour
     let R2=br*(1-a)+ir*a, G2=bg2*(1-a)+ig*a, B2=bb*(1-a)+ib*a;
-    if (keep && keep[i]>0){ const q=keep[i]; R2=R2*(1-q)+orig[k]*q; G2=G2*(1-q)+orig[k+1]*q; B2=B2*(1-q)+orig[k+2]*q; }
+    let sameShade=false;
+    if (tinted && !(br===255 && bg2===255 && bb===255)){ const dq=Math.max(Math.abs(orig[k]-br), Math.abs(orig[k+1]-bg2), Math.abs(orig[k+2]-bb)); sameShade = dq < 30; }
+    if (keep && keep[i]>0 && !sameShade){ const q=keep[i]; R2=R2*(1-q)+orig[k]*q; G2=G2*(1-q)+orig[k+1]*q; B2=B2*(1-q)+orig[k+2]*q; }
     out[k]=R2; out[k+1]=G2; out[k+2]=B2;
   }
 }
