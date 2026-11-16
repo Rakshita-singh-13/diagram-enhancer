@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Diagram Image Enhancer</title>
-<meta name="de-version" content="2026.11.16-5">
+<meta name="de-version" content="2026.11.16-6">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:wght@400;700&family=Noto+Serif:wght@400;700&family=Noto+Sans:wght@400;700&family=Noto+Sans+Math&family=Noto+Sans+Symbols&family=Noto+Sans+Symbols+2&family=Noto+Sans+Mono&display=swap">
 <style>
 :root{
@@ -129,7 +129,7 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
 </head>
 <body>
 <header>
-  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.16-5</span></h1>
+  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.16-6</span></h1>
   <p>Upscales, sharpens and cleans diagrams using pure image math (no AI redrawing), so lines, labels, structures and symbols stay exactly as drawn. Your images are processed on your own device and never uploaded.</p>
 </header>
 
@@ -294,6 +294,7 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
 "use strict";
 self.onmessage = (e) => {
   try { const r = enhance(e.data);
+    if (r.hybrid){ self.postMessage({type:'done', vector:true, hybrid:true, bg:r.bg, d:r.d, caps:r.caps||'', sd:r.sd||'', sw:r.sw||0, w2:r.w2, h2:r.h2, scale:r.scale}, [r.bg]); return; }
     if (r.vector){ self.postMessage({type:'done', vector:true, d:r.d, sd:r.sd||'', sw:r.sw||0, w2:r.w2, h2:r.h2, scale:r.scale, colour:r.colour, shading:r.shading}); return; }
     self.postMessage({type:'done', data:r.data, w2:r.w2, h2:r.h2, scale:r.scale, switched:r.switched}, [r.data]); }
   catch (err) { self.postMessage({type:'error', message:String(err && err.message || err)}); }
@@ -324,6 +325,11 @@ function enhance({data, w, h, opts}){
     const fv = f.slice();
     const r = vectorize(fv, w, h, opts);
     if (!(r.colour || r.shading)) return r;
+    // pale colour fills with plain dark lines: flat fills from Crisp, lines redrawn smooth and thin on top
+    if (r.tintF > 0.005 && r.satF < 0.002 && opts.vHybrid !== false){
+      const hy = hybrid(f, w, h, opts, r.scale);
+      if (hy) return hy;
+    }
     // shading or colour found: vector would turn it black, so use Crisp (keeps shading and colours)
     switched = true; opts = {...opts, vector:false, crisp:true, scale: Math.min(4, Math.max(2, opts.vscale||4))};
   }
@@ -500,6 +506,18 @@ function lineRedraw(mask, W, H, S, vs, o){
     }
     cand=cand.filter(i=>sk[i]);
   }
+  // remove staircase clumps (2x2 knots on diagonal steps) so each line is one pixel wide and not full of fake junctions
+  if (o.vStair === true) for (let pass=0; pass<2; pass++) for (const i of cand){ if (!sk[i]) continue; const p=nb(i);
+    if (!((p[0]&&p[2]&&!p[5]) || (p[2]&&p[4]&&!p[7]) || (p[4]&&p[6]&&!p[1]) || (p[6]&&p[0]&&!p[3]))) continue;
+    // still one connected piece around it (8-connected) without this pixel?
+    const lb=[-1,-1,-1,-1,-1,-1,-1,-1]; let nc8=0, B=0;
+    for (let j=0;j<8;j++){ if (!p[j] || lb[j]>=0) continue; B++; const st=[j]; lb[j]=nc8;
+      while (st.length){ const a=st.pop(); const adj=[(a+1)%8, (a+7)%8]; if (a%2===0){ adj.push((a+2)%8, (a+6)%8); }
+        for (const b of adj) if (p[b] && lb[b]<0){ lb[b]=nc8; st.push(b); } }
+      nc8++; }
+    let cnt=0; for (const q of p) cnt+=q;
+    if (nc8===1 && cnt>=2) sk[i]=0; }
+  cand=cand.filter(i=>sk[i]);
   const skel=cand;
   if (!skel.length) return null;
   const sv=skel.map(i=>dt[i]).sort((a,b)=>a-b), hw=Math.max(1, sv[Math.floor(sv.length/2)]);
@@ -513,9 +531,14 @@ function lineRedraw(mask, W, H, S, vs, o){
     while (stack.length){ const p=stack.pop(); cPix[id].push(p); if (sk[p]) cSk[id]++; const x=p%W, y=(p/W)|0;
       for (let dy=-1;dy<=1;dy++) for (let dx=-1;dx<=1;dx++){ if (!dx&&!dy) continue; const xx=x+dx, yy=y+dy; if (xx<0||yy<0||xx>=W||yy>=H) continue; const q=yy*W+xx; if (mask[q] && comp[q]<0){ comp[q]=id; stack.push(q); } } } }
   for (let c=0;c<nc;c++){
-    let md=0; for (const p of cPix[c]) if (dt[p]>md) md=dt[p];
+    let thick=0, ns=0; for (const p of cPix[c]) if (sk[p]){ ns++; if (dt[p] > hw*(o.boldT ?? 1.35)) thick++; }
     // tiny specks, and bold pieces (bold text, thick strokes) keep their real outline instead of a thin centre line
-    if (cSk[c] < hw*4 || md > hw*1.7) for (const p of cPix[c]) fill[p]=1; }
+    // (bold = most of its centre line is thick; one wide crossing of two lines does not count)
+    let bx0=W, by0=H, bx1=0, by1=0; if (o.keepSmall){ for (const p of cPix[c]){ const x=p%W, y=(p/W)|0; if (x<bx0) bx0=x; if (x>bx1) bx1=x; if (y<by0) by0=y; if (y>by1) by1=y; } }
+    const small = o.keepSmall && Math.max(bx1-bx0, by1-by0) < o.keepSmall*Math.max(W,H);
+    let md=0; for (const p of cPix[c]) if (dt[p]>md) md=dt[p];
+    const bold = (o.boldA ?? 1.7) > 0 ? (md > hw*(o.boldA ?? 1.7) && thick > ns*(o.boldF ?? 0.12)) : false;
+    if (cSk[c] < hw*4 || bold || small) for (const p of cPix[c]) fill[p]=1; }
   for (const i of skel) if (fill[i]) sk[i]=0;
   // trace centre lines into chains
   const isS=i=>sk[i]===1, nbrs=i=>{ const x=i%W, y=(i/W)|0, out=[]; for (let dy=-1;dy<=1;dy++) for (let dx=-1;dx<=1;dx++){ if (!dx&&!dy) continue; const xx=x+dx, yy=y+dy; if (xx<0||yy<0||xx>=W||yy>=H) continue; const q=yy*W+xx; if (sk[q]) out.push(q); } return out; };
@@ -546,6 +569,21 @@ function lineRedraw(mask, W, H, S, vs, o){
     const ext=(end)=>{ const n=P.length; if (n<2) return; const a= end? P[n-1] : P[0], bI = end? Math.max(0,n-1-Math.round(hw*2)) : Math.min(n-1, Math.round(hw*2)), b=P[bI];
       const dx=a[0]-b[0], dy=a[1]-b[1], L=Math.hypot(dx,dy)||1; const np=[a[0]+dx/L*hw*0.95, a[1]+dy/L*hw*0.95]; if (end) P.push(np); else P.unshift(np); };
     if (!c.closed){ if (deg[c.p[0]]===1) ext(false); if (deg[c.p[c.p.length-1]]===1) ext(true); }
+    if (o.vSmoothR && P.length > 6){
+      const r=o.vSmoothR, n0=P.length, cl=c.closed, at=(i)=> cl ? P[((i%n0)+n0)%n0] : P[Math.max(0,Math.min(n0-1,i))];
+      // real corners: direction turns sharply over a span of r
+      const isC=new Uint8Array(n0), ang=new Float32Array(n0);
+      for (let i=0;i<n0;i++){ if (!cl && (i<r || i>n0-1-r)) continue; const a=at(i-r), b=at(i), d=at(i+r);
+        const v1=[b[0]-a[0], b[1]-a[1]], v2=[d[0]-b[0], d[1]-b[1]]; ang[i]=Math.acos(Math.max(-1,Math.min(1,(v1[0]*v2[0]+v1[1]*v2[1])/((Math.hypot(...v1)||1)*(Math.hypot(...v2)||1))))); }
+      for (let i=0;i<n0;i++){ if (ang[i] < 0.75) continue; let mx=true; for (let j=-r;j<=r;j++){ const q=cl? ((i+j)%n0+n0)%n0 : i+j; if (q<0||q>=n0) continue; if (ang[q]>ang[i] || (ang[q]===ang[i] && q<i)) { mx=false; break; } } if (mx) isC[i]=1; }
+      const S2=new Array(n0);
+      for (let i=0;i<n0;i++){
+        if (isC[i] || (!cl && (i===0 || i===n0-1))){ S2[i]=P[i]; continue; }
+        let sx=0, sy=0, wsum=0;
+        for (const dir of [-1,1]) for (let j=1;j<=r;j++){ const q=i+dir*j; const qq=cl? ((q%n0)+n0)%n0 : q; if (qq<0||qq>=n0) break; if (isC[qq]) break; const wt=1-j/(r+1); sx+=P[qq][0]*wt; sy+=P[qq][1]*wt; wsum+=wt; if (!cl && (qq===0||qq===n0-1)) break; }
+        S2[i]=[(sx+P[i][0])/(wsum+1), (sy+P[i][1])/(wsum+1)]; }
+      P=S2;
+    }
     let Q=dp(P, tol); if (c.closed && Q.length>2 && (Q[0][0]!==Q[Q.length-1][0] || Q[0][1]!==Q[Q.length-1][1])) Q.push(Q[0]);
     const n=Q.length; if (n<2) continue;
     const corner=(i)=>{ if (i<=0||i>=n-1) return true; const a=Q[i-1], b=Q[i], cc=Q[i+1]; const v1=[b[0]-a[0],b[1]-a[1]], v2=[cc[0]-b[0],cc[1]-b[1]];
@@ -563,7 +601,7 @@ function lineRedraw(mask, W, H, S, vs, o){
   let jd='';
   for (const j of junctions){ if (!sk[j]) continue; const [x,y]=XY(j), r=hw*0.98*(o.vSw ?? 1); jd+=`M${f2(x-r)} ${f2(y)}a${f2(r)} ${f2(r)} 0 1 0 ${f2(2*r)} 0a${f2(r)} ${f2(r)} 0 1 0 ${f2(-2*r)} 0`; }
   const fd = self.traceMask(fill, W, H, k, {turdSize: Math.round(S*S*0.3), alphaMax: 0.9, optTolerance: 0.3});
-  return {fd: fd + jd, sd, sw: Math.max(1, (2*hw-0.6)*k*(o.vSw ?? 1))};
+  return {fd: fd + jd, fill: fd, caps: jd, sd, sw: Math.max(1, (2*hw-0.6)*k*(o.vSw ?? 1))};
 }
 
 /* ---- vector smooth: trace every line and letter into smooth curves (potrace), redraw at any size ---- */
@@ -671,10 +709,36 @@ function vectorize(f, w, h, o){
   const vs = o.vscale || 6;
   if (o.vUniform === true){
     const lr = lineRedraw(mask, W, H, S, vs, o);
-    if (lr) return {vector:true, d: lr.fd, sd: lr.sd, sw: lr.sw, w2: w*vs, h2: h*vs, scale: vs, colour: sat > N*0.002 || tint > N*0.005, shading: mid > N*0.02};
+    if (lr) return {vector:true, d: lr.fd, sd: lr.sd, sw: lr.sw, w2: w*vs, h2: h*vs, scale: vs, colour: sat > N*0.002 || tint > N*0.005, shading: mid > N*0.02, satF: sat/N, tintF: tint/N};
   }
   const d = self.traceMask(mask, W, H, vs/S, {turdSize: Math.round(S*S*0.8), alphaMax: (o.vAlpha ?? 0.9), optTolerance: (o.vTol ?? 0.3)});
-  return {vector:true, d, w2: w*vs, h2: h*vs, scale: vs, colour: sat > N*0.002 || tint > N*0.005, shading: mid > N*0.02};
+  return {vector:true, d, w2: w*vs, h2: h*vs, scale: vs, colour: sat > N*0.002 || tint > N*0.005, shading: mid > N*0.02, satF: sat/N, tintF: tint/N};
+}
+
+/* ---- hybrid: Crisp's flat fills underneath, every line traced into smooth even strokes on top ---- */
+function hybrid(f, w, h, o, vs){
+  const s=vs, W=w*s, H=h*s; if (W*H > 16e6) return null;
+  const g=f.slice(); for (let i=0;i<w*h;i++){ if (g[i*4+3] < 255){ const a=g[i*4+3]/255; g[i*4]=g[i*4]*a+255*(1-a); g[i*4+1]=g[i*4+1]*a+255*(1-a); g[i*4+2]=g[i*4+2]*a+255*(1-a); g[i*4+3]=255; } }
+  prog('Flattening colour fills', .45);
+  const out=resize(g, w, h, W, H, false), ink=new Float32Array(W*H);
+  crisp(out, W, H, {...o, crisp:true, split:ink}, s);
+  const mask=new Uint8Array(W*H); let n=0; for (let i=0;i<W*H;i++) if (ink[i] > 0.5){ mask[i]=1; n++; }
+  if (!n) return null;
+  prog('Drawing smooth curves', .7);
+  let d='', sd='', sw=0, caps='';
+  const lr = lineRedraw(mask, W, H, s, s, {vSw: w*h < 30000 ? 0.75 : 0.85, vDp: 0.3, vSmoothR: Math.max(3, Math.round(2*s)), keepSmall: 0.09, vStair: true, ...o});
+  if (lr){ d=lr.fill; caps=lr.caps; sd=lr.sd; sw=lr.sw; }
+  else d = self.traceMask(mask, W, H, 1, {turdSize: Math.round(s*s*0.8), alphaMax: (o.vAlpha ?? 0.9), optTolerance: (o.vTol ?? 0.3)});
+  // under the old (thicker) ink, take the colour of the nearest background pixel that is clearly not ink,
+  // so the fill meets each line at its centre with no white halo
+  { const NN=W*H, src=new Int32Array(NN).fill(-1), dd=new Float32Array(NN).fill(1e9);
+    for (let i=0;i<NN;i++) if (ink[i] < 0.08){ src[i]=i; dd[i]=0; }
+    const rl=(i,j,c)=>{ if (src[j]>=0 && dd[j]+c<dd[i]){ dd[i]=dd[j]+c; src[i]=src[j]; } };
+    for (let y=0;y<H;y++) for (let x=0;x<W;x++){ const i=y*W+x; if (!dd[i]) continue; if (x>0) rl(i,i-1,1); if (y>0){ rl(i,i-W,1); if (x>0) rl(i,i-W-1,1.414); if (x<W-1) rl(i,i-W+1,1.414); } }
+    for (let y=H-1;y>=0;y--) for (let x=W-1;x>=0;x--){ const i=y*W+x; if (!dd[i]) continue; if (x<W-1) rl(i,i+1,1); if (y<H-1){ rl(i,i+W,1); if (x<W-1) rl(i,i+W+1,1.414); if (x>0) rl(i,i+W-1,1.414); } }
+    for (let i=0;i<NN;i++) if (dd[i]>0 && src[i]>=0){ const q=src[i]*4, k=i*4; out[k]=out[q]; out[k+1]=out[q+1]; out[k+2]=out[q+2]; } }
+  const bg=new Uint8ClampedArray(W*H*4); for (let i=0;i<W*H*4;i++) bg[i]= (i&3)===3 ? 255 : out[i];
+  return {vector:true, hybrid:true, bg: bg.buffer, d, caps, sd, sw, w2: W, h2: H, scale: s};
 }
 
 /* ---- crisp mode: smooth anti-aliased black/colour ink on pure white ---- */
@@ -787,8 +851,8 @@ function crisp(out, w, h, o, s){
     for (const P of pal){ if (P.n > N*0.004) continue; let bc=null, bd=1e9;
       for (const Q of pal){ if (Q===P || Q.n < P.n*4) continue; const d=Math.max(Math.abs(P[0]-Q[0]), Math.abs(P[1]-Q[1]), Math.abs(P[2]-Q[2])); if (d<bd){ bd=d; bc=Q; } }
       const dw=Math.max(255-P[0], 255-P[1], 255-P[2]);
-      if (dw < bd && dw <= 30){ P.col[0]=P.col[1]=P.col[2]=255; }
-      else if (bc && bd <= 30){ P.col[0]=bc[0]; P.col[1]=bc[1]; P.col[2]=bc[2]; } }
+      if (bc && bd <= 30){ P.col[0]=bc[0]; P.col[1]=bc[1]; P.col[2]=bc[2]; }
+      else if (dw <= 30){ P.col[0]=P.col[1]=P.col[2]=255; } }
     // a shade so close to white that it is just paper tone becomes white
     for (const P of pal){ const c=P.col; if (Math.min(c[0],c[1],c[2]) > 248 && Math.max(c[0],c[1],c[2])-Math.min(c[0],c[1],c[2]) < 5){ c[0]=c[1]=c[2]=255; } }
   }
@@ -820,6 +884,10 @@ function crisp(out, w, h, o, s){
     let R2=br*(1-a)+ir*a, G2=bg2*(1-a)+ig*a, B2=bb*(1-a)+ib*a;
     let sameShade=false;
     if (tinted && !(br===255 && bg2===255 && bb===255)){ const dq=Math.max(Math.abs(orig[k]-br), Math.abs(orig[k+1]-bg2), Math.abs(orig[k+2]-bb)); sameShade = dq < 30; }
+    if (o.split){ o.split[i]=a; let r3=br, g3=bg2, b3=bb;
+      // a flat mid-tone area that the region pass took for paper: use its smooth box colour (not the raw blotchy scan)
+      if (keep && keep[i]>0 && !sameShade){ const q=keep[i]; r3=br*(1-q)+bgc[0][i]*q; g3=bg2*(1-q)+bgc[1][i]*q; b3=bb*(1-q)+bgc[2][i]*q; }
+      out[k]=r3; out[k+1]=g3; out[k+2]=b3; continue; }
     if (keep && keep[i]>0 && !sameShade){ const q=keep[i]; R2=R2*(1-q)+orig[k]*q; G2=G2*(1-q)+orig[k+1]*q; B2=B2*(1-q)+orig[k+2]*q; }
     out[k]=R2; out[k+1]=G2; out[k+2]=B2;
   }
@@ -1040,10 +1108,13 @@ function process(it){
     it.svg = null; it.vnote = '';
     if (m.vector){
       const cx = oc.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, m.w2, m.h2);
+      if (m.hybrid){ cx.putImageData(new ImageData(new Uint8ClampedArray(m.bg), m.w2, m.h2), 0, 0); cx.fillStyle = '#000';
+        if (m.d) cx.fill(new Path2D(m.d), 'evenodd'); if (m.caps) cx.fill(new Path2D(m.caps), 'nonzero'); m.d = ''; }
       cx.fillStyle = '#000'; if (m.d) cx.fill(new Path2D(m.d), m.sd ? 'nonzero' : 'evenodd');
       if (m.sd){ cx.strokeStyle = '#000'; cx.lineWidth = m.sw; cx.lineJoin = 'miter'; cx.miterLimit = 6; cx.lineCap = 'butt'; cx.stroke(new Path2D(m.sd)); }
       it.svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${m.w2}" height="${m.h2}" viewBox="0 0 ${m.w2} ${m.h2}"><rect width="100%" height="100%" fill="#fff"/><path fill="#000" fill-rule="${m.sd ? 'nonzero' : 'evenodd'}" d="${m.d}"/>${m.sd ? `<path fill="none" stroke="#000" stroke-width="${m.sw.toFixed(2)}" stroke-linejoin="miter" stroke-miterlimit="6" stroke-linecap="butt" d="${m.sd}"/>` : ''}</svg>`;
-      if (m.colour || m.shading) it.vnote = 'This image has ' + (m.colour ? 'colour' : '') + (m.colour && m.shading ? ' and ' : '') + (m.shading ? 'grey shading' : '') + '. Vector mode draws black lines only, so choose the “Crisp” preset to keep them.';
+      if (m.hybrid){ it.svg = null; it.vnote = 'Colour fills kept flat; lines redrawn smooth on top.'; }
+      else if (m.colour || m.shading) it.vnote = 'This image has ' + (m.colour ? 'colour' : '') + (m.colour && m.shading ? ' and ' : '') + (m.shading ? 'grey shading' : '') + '. Vector mode draws black lines only, so choose the “Crisp” preset to keep them.';
     } else {
       oc.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(m.data), m.w2, m.h2), 0, 0);
       if (m.switched === 'blank') it.vnote = 'This image has almost no lines or text to clean up, so it was only enlarged.';
