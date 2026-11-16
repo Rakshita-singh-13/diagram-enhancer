@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Diagram Image Enhancer</title>
-<meta name="de-version" content="2026.11.16-2">
+<meta name="de-version" content="2026.11.16-4">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:wght@400;700&family=Noto+Serif:wght@400;700&family=Noto+Sans:wght@400;700&family=Noto+Sans+Math&family=Noto+Sans+Symbols&family=Noto+Sans+Symbols+2&family=Noto+Sans+Mono&display=swap">
 <style>
 :root{
@@ -129,7 +129,7 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
 </head>
 <body>
 <header>
-  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.16-2</span></h1>
+  <h1>Diagram Image Enhancer <span style="font-size:11px;font-weight:500;color:var(--muted)">v2026.11.16-4</span></h1>
   <p>Upscales, sharpens and cleans diagrams using pure image math (no AI redrawing), so lines, labels, structures and symbols stay exactly as drawn. Your images are processed on your own device and never uploaded.</p>
 </header>
 
@@ -311,6 +311,10 @@ function enhance({data, w, h, opts}){
   if (opts.flatten){ prog('Evening out lighting', .05); flatten(f, w, h); }
   if (opts.denoise>0){ prog('Reducing noise', .12); f = bilateral(f, w, h, opts.denoise); }
   let switched = false;
+  // nothing drawn (blank or almost blank image): just enlarge it, never trace noise into blobs
+  { const hb=new Uint32Array(256); for (let i=0;i<N;i++){ const k=i*4; hb[Math.min(f[k],f[k+1],f[k+2])|0]++; }
+    let a=0, lo=0, hi=255; for (let i=0;i<256;i++){ a+=hb[i]; if (a>=N*0.002){ lo=i; break; } } a=0; for (let i=255;i>=0;i--){ a+=hb[i]; if (a>=N*0.5){ hi=i; break; } }
+    if (hi-lo < 45 && (opts.vector || opts.crisp)){ switched = 'blank'; opts = {...opts, vector:false, crisp:false, scale: Math.min(4, Math.max(2, opts.vscale||4))}; } }
   // very small images: lines are ~1 pixel wide and touch each other, so tracing would merge them into blobs
   if (opts.vector && w*h < 6000 && !opts.vForce){ switched = 'tiny'; opts = {...opts, vector:false, crisp:false, scale: Math.max(4, Math.min(6, opts.vscale||4))}; }
   // small images (lines about 1 pixel wide): redraw each line along its centre with one even pen width
@@ -508,7 +512,10 @@ function lineRedraw(mask, W, H, S, vs, o){
   for (let i=0;i<N;i++){ if (!mask[i] || comp[i]>=0) continue; const id=nc++; cSk.push(0); cPix.push([]); stack.push(i); comp[i]=id;
     while (stack.length){ const p=stack.pop(); cPix[id].push(p); if (sk[p]) cSk[id]++; const x=p%W, y=(p/W)|0;
       for (let dy=-1;dy<=1;dy++) for (let dx=-1;dx<=1;dx++){ if (!dx&&!dy) continue; const xx=x+dx, yy=y+dy; if (xx<0||yy<0||xx>=W||yy>=H) continue; const q=yy*W+xx; if (mask[q] && comp[q]<0){ comp[q]=id; stack.push(q); } } } }
-  for (let c=0;c<nc;c++) if (cSk[c] < hw*4) for (const p of cPix[c]) fill[p]=1;
+  for (let c=0;c<nc;c++){
+    let md=0; for (const p of cPix[c]) if (dt[p]>md) md=dt[p];
+    // tiny specks, and bold pieces (bold text, thick strokes) keep their real outline instead of a thin centre line
+    if (cSk[c] < hw*4 || md > hw*1.7) for (const p of cPix[c]) fill[p]=1; }
   for (const i of skel) if (fill[i]) sk[i]=0;
   // trace centre lines into chains
   const isS=i=>sk[i]===1, nbrs=i=>{ const x=i%W, y=(i/W)|0, out=[]; for (let dy=-1;dy<=1;dy++) for (let dx=-1;dx<=1;dx++){ if (!dx&&!dy) continue; const xx=x+dx, yy=y+dy; if (xx<0||yy<0||xx>=W||yy>=H) continue; const q=yy*W+xx; if (sk[q]) out.push(q); } return out; };
@@ -608,7 +615,7 @@ function vectorize(f, w, h, o){
   const up = resize(f, w, h, W, H, false);
   const N = W*H, V = new Float32Array(N);
   let sat = 0, tint = 0;   // tint: pale coloured fills (light pink, yellow, blue boxes)
-  for (let i=0;i<N;i++){ const k=i*4, r=up[k], g=up[k+1], b=up[k+2], mx=Math.max(r,g,b), mn=Math.min(r,g,b); V[i]=mn; if (mx-mn>60 && mn<200) sat++; else if (mx-mn>=12 && mn>170) tint++; }
+  for (let i=0;i<N;i++){ const k=i*4, r=up[k], g=up[k+1], b=up[k+2], mx=Math.max(r,g,b), mn=Math.min(r,g,b); V[i]=mn; if (mx-mn>40 && mn<200) sat++; else if (mx-mn>=12 && mn>150) tint++; }
   prog('Tracing lines', .5);
   const Vb = gauss(V, W, H, Math.max(0.5, (o.vBlur ?? 0.35)*o.smooth*S));
   const hist = new Uint32Array(256); for (let i=0;i<N;i++) hist[Math.max(0,Math.min(255,Vb[i]|0))]++;
@@ -658,16 +665,16 @@ function vectorize(f, w, h, o){
     let a3=0, sInk=0, sPap=255; for (let i=0;i<256;i++){ a3+=sh[i]; if (a3>=n0*0.01){ sInk=i; break; } }
     a3=0; for (let i=255;i>=0;i--){ a3+=sh[i]; if (a3>=n0*0.3){ sPap=i; break; } }
     const R0=Math.max(30, sPap-sInk);
-    for (let i=0;i<n0;i++){ const v=sg[i]; if (v > sInk+0.25*R0 && v < sPap-0.18*R0 && Math.abs(sv[i]-v) < 0.05*R0) mid++; }
+    for (let i=0;i<n0;i++){ const v=sg[i]; if (v > sInk+0.25*R0 && v < sPap-Math.max(8, 0.06*R0) && Math.abs(sv[i]-v) < Math.min(6, 0.05*R0)) mid++; }
     mid = mid / n0 * N; }
   prog('Drawing smooth curves', .7);
   const vs = o.vscale || 6;
   if (o.vUniform === true){
     const lr = lineRedraw(mask, W, H, S, vs, o);
-    if (lr) return {vector:true, d: lr.fd, sd: lr.sd, sw: lr.sw, w2: w*vs, h2: h*vs, scale: vs, colour: sat > N*0.003 || tint > N*0.02, shading: mid > N*0.02};
+    if (lr) return {vector:true, d: lr.fd, sd: lr.sd, sw: lr.sw, w2: w*vs, h2: h*vs, scale: vs, colour: sat > N*0.002 || tint > N*0.005, shading: mid > N*0.02};
   }
   const d = self.traceMask(mask, W, H, vs/S, {turdSize: Math.round(S*S*0.8), alphaMax: (o.vAlpha ?? 0.9), optTolerance: (o.vTol ?? 0.3)});
-  return {vector:true, d, w2: w*vs, h2: h*vs, scale: vs, colour: sat > N*0.003 || tint > N*0.02, shading: mid > N*0.02};
+  return {vector:true, d, w2: w*vs, h2: h*vs, scale: vs, colour: sat > N*0.002 || tint > N*0.005, shading: mid > N*0.02};
 }
 
 /* ---- crisp mode: smooth anti-aliased black/colour ink on pure white ---- */
@@ -738,6 +745,37 @@ function crisp(out, w, h, o, s){
   const relax=(i,j,c)=>{ if (near[j]>=0 && nd[j]+c<nd[i]){ nd[i]=nd[j]+c; near[i]=near[j]; } };
   for (let y=0;y<h;y++) for (let x=0;x<w;x++){ const i=y*w+x; if (!nd[i]) continue; if (x>0) relax(i,i-1,1); if (y>0){ relax(i,i-w,1); if (x>0) relax(i,i-w-1,1.414); if (x<w-1) relax(i,i-w+1,1.414); } }
   for (let y=h-1;y>=0;y--) for (let x=w-1;x>=0;x--){ const i=y*w+x; if (!nd[i]) continue; if (x<w-1) relax(i,i+1,1); if (y<h-1){ relax(i,i+w,1); if (x<w-1) relax(i,i+w+1,1.414); if (x>0) relax(i,i+w-1,1.414); } }
+  // background regions: areas of plain background separated by lines. Each one either continues the area around it
+  // (paper, or the same fill seen through a gap) or is a fill of its own (a pale pink box, a light grey box)
+  const lab=new Int32Array(N).fill(-1); const reg=[];
+  { const st=[];
+    for (let i0=0;i0<N;i0++){ if (nd[i0]!==0 || lab[i0]>=0) continue;
+      const id=reg.length, R={n:0, r:0, g:0, b:0, x0:w, y0:h, x1:0, y1:0}; reg.push(R); lab[i0]=id; st.push(i0);
+      while (st.length){ const p=st.pop(), x=p%w, y=(p/w)|0; R.n++; R.r+=orig[p*4]; R.g+=orig[p*4+1]; R.b+=orig[p*4+2];
+        if (x<R.x0) R.x0=x; if (x>R.x1) R.x1=x; if (y<R.y0) R.y0=y; if (y>R.y1) R.y1=y;
+        if (x>0 && nd[p-1]===0 && lab[p-1]<0){ lab[p-1]=id; st.push(p-1); } if (x<w-1 && nd[p+1]===0 && lab[p+1]<0){ lab[p+1]=id; st.push(p+1); }
+        if (y>0 && nd[p-w]===0 && lab[p-w]<0){ lab[p-w]=id; st.push(p-w); } if (y<h-1 && nd[p+w]===0 && lab[p+w]<0){ lab[p+w]=id; st.push(p+w); } }
+      R.r/=R.n; R.g/=R.n; R.b/=R.n; } }
+  const order=reg.map((_,i)=>i).sort((a,b)=>reg[b].n-reg[a].n), m0=Math.max(4, Math.round(3*s));
+  for (const id of order){ const R=reg[id];
+    if (id===order[0]){ R.out=[255,255,255]; continue; }
+    // what lies just outside this area (sampled on a ring around it)
+    const votes=new Map(), x0=Math.max(0,R.x0-m0), x1=Math.min(w-1,R.x1+m0), y0=Math.max(0,R.y0-m0), y1=Math.min(h-1,R.y1+m0);
+    // compare colours close to the border on both sides (so uneven light across a photo does not count as a fill)
+    const vote=(x,y)=>{ const q=near[y*w+x]; if (q<0) return; const l=lab[q]; if (l<0 || l===id || !reg[l].out) return; let v=votes.get(l); if (!v){ v=[0,0,0,0]; votes.set(l,v); } v[0]++; v[1]+=orig[q*4]; v[2]+=orig[q*4+1]; v[3]+=orig[q*4+2]; };
+    const stp=Math.max(1, Math.round(s));
+    for (let x=x0;x<=x1;x+=stp){ vote(x,y0); vote(x,y1); } for (let y=y0;y<=y1;y+=stp){ vote(x0,y); vote(x1,y); }
+    let nb=-1, nv=0, oc=null; for (const [l,v] of votes) if (v[0]>nv){ nv=v[0]; nb=l; oc=[v[1]/v[0], v[2]/v[0], v[3]/v[0]]; }
+    const O = nb>=0 ? reg[nb] : reg[order[0]]; if (!oc) oc=[O.r,O.g,O.b];
+    let ic=[0,0,0], icn=0; { const a0=R.x0+m0, a1=R.x1-m0, b0=R.y0+m0, b1=R.y1-m0;
+      const samp=(x,y)=>{ const q=near[y*w+x]; if (q<0 || lab[q]!==id) return; ic[0]+=orig[q*4]; ic[1]+=orig[q*4+1]; ic[2]+=orig[q*4+2]; icn++; };
+      if (a1>a0 && b1>b0){ for (let x=a0;x<=a1;x+=stp){ samp(x,b0); samp(x,b1); } for (let y=b0;y<=b1;y+=stp){ samp(a0,y); samp(a1,y); } } }
+    if (icn < 4){ ic=[R.r,R.g,R.b]; } else ic=ic.map(v=>v/icn);
+    const diff=Math.max(Math.abs(ic[0]-oc[0]), Math.abs(ic[1]-oc[1]), Math.abs(ic[2]-oc[2]));
+    if (diff < 10 || (R.n < 9*s*s && diff < 25)) R.out = O.out;                       // same as around it: paper stays paper, a fill stays that fill
+    else if (Math.min(R.r,R.g,R.b) > 246 && Math.max(R.r,R.g,R.b)-Math.min(R.r,R.g,R.b) < 6) R.out=[255,255,255];
+    else R.out=[R.r, R.g, R.b];                                         // a fill of its own: keep its colour, evened out
+  }
   for (let i=0;i<N;i++){
     const k=i*4;
     // background level: the box colour around, but inside a pen stroke (letters, lines) the paper next to the stroke
@@ -755,8 +793,7 @@ function crisp(out, w, h, o, s){
     let br=bgc[0][i], bg2=bgc[1][i], bb=bgc[2][i];
     const bl=0.299*br+0.587*bg2+0.114*bb, bs=Math.max(br,bg2,bb)-Math.min(br,bg2,bb);
     let tinted=false;
-    if (near[i]>=0){ const q=near[i]*4, nr=orig[q], ng=orig[q+1], nb=orig[q+2];
-      if (0.299*nr+0.587*ng+0.114*nb > 200 && Math.max(nr,ng,nb)-Math.min(nr,ng,nb) >= 9 && Math.max(Math.abs(nr-pc[0]), Math.abs(ng-pc[1]), Math.abs(nb-pc[2])) >= 12){ br=nr; bg2=ng; bb=nb; tinted=true; } }
+    if (near[i]>=0 && nd[i] <= 8*s){ const Rg=reg[lab[near[i]]]; if (Rg && Rg.out){ br=Rg.out[0]; bg2=Rg.out[1]; bb=Rg.out[2]; tinted=true; } }
     const dpc = Math.max(Math.abs(br-pc[0]), Math.abs(bg2-pc[1]), Math.abs(bb-pc[2]));
     if (!tinted && ((bl > 232 && bs < 10) || dpc < 12 || (bs < 12 && bl >= paper[i] - 0.12*Math.max(30, paper[i]-ink)))){ br=bg2=bb=255; }   // paper (even dim grey paper) -> clean white; tinted boxes keep their colour
     let R2=br*(1-a)+ir*a, G2=bg2*(1-a)+ig*a, B2=bb*(1-a)+ib*a;
@@ -986,7 +1023,8 @@ function process(it){
       if (m.colour || m.shading) it.vnote = 'This image has ' + (m.colour ? 'colour' : '') + (m.colour && m.shading ? ' and ' : '') + (m.shading ? 'grey shading' : '') + '. Vector mode draws black lines only, so choose the “Crisp” preset to keep them.';
     } else {
       oc.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(m.data), m.w2, m.h2), 0, 0);
-      if (m.switched === 'tiny') it.vnote = `This image is very small (${it.w}×${it.h} px): its lines are only 1 pixel thin and touch each other, so tracing would merge them into blobs. It was enlarged without tracing instead. For a clean redrawn result, take a bigger screenshot — zoom the PDF to 200–300% first.`;
+      if (m.switched === 'blank') it.vnote = 'This image has almost no lines or text to clean up, so it was only enlarged.';
+      else if (m.switched === 'tiny') it.vnote = `This image is very small (${it.w}×${it.h} px): its lines are only 1 pixel thin and touch each other, so tracing would merge them into blobs. It was enlarged without tracing instead. For a clean redrawn result, take a bigger screenshot — zoom the PDF to 200–300% first.`;
       else if (m.switched) it.vnote = 'This figure has shading or colour, so it was enhanced in Crisp mode to keep it exactly.';
     }
     const blob = await new Promise(r => oc.toBlob(r, 'image/png'));
